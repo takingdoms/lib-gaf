@@ -1,0 +1,17 @@
+{
+  "name": "@takingdoms/lib-gaf",
+  "version": "0.0.1",
+  "description": "",
+  "author": "Celso L",
+  "repository": "takingdoms/lib-gaf",
+  "license": "ISC",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepare" : "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^4.9.4"
+  }
+}
