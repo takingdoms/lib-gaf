@@ -193,7 +193,7 @@ function normalizeFrameData(frameData: GafFrameData): GafFrameData {
   if (frameData.decompressed) {
     const normalizedPixelTable: Array<number | undefined>[] = [];
 
-    for (let i = 0; frameData.pixelTable.length; i++) {
+    for (let i = 0; i < frameData.pixelTable.length; i++) {
       const srcLine = frameData.pixelTable[i];
 
       if (srcLine.length === maxWidth) {
