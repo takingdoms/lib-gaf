@@ -1,2 +1,2 @@
-export * from './src/gaf';
-export * from './src/parse-gaf';
+export * as Gaf from './src/gaf';
+export * as GafReader from './src/read-gaf';
