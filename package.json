@@ -9,9 +9,10 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "prepare" : "npm run build"
+    "prepare": "npm run build"
   },
   "devDependencies": {
+    "ts-essentials": "^9.4.1",
     "typescript": "^4.9.4"
   }
 }

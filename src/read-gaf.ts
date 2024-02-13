@@ -1,6 +1,6 @@
 import { ByteUtils } from "./byte-utils";
-import { Entry, Frame, FrameData, FrameDataSingleLayer, LayerData } from "./gaf";
-import { GAF_HEADER_STRUCT_SIZE, GAF_ENTRY_STRUCT_SIZE, GAF_HEADER_STRUCT, GAF_ENTRY_STRUCT, GAF_FRAME_STRUCT_SIZE, GAF_FRAME_STRUCT, GAF_FRAME_DATA_STRUCT } from "./structs";
+import { Entry, Frame, FrameData, FrameDataSingleLayer, LayerData, LayerDataPaletteIndices, LayerDataRawColors } from "./gaf";
+import { GAF_ENTRY_STRUCT, GAF_ENTRY_STRUCT_SIZE, GAF_FRAME_DATA_STRUCT, GAF_FRAME_STRUCT, GAF_FRAME_STRUCT_SIZE, GAF_HEADER_STRUCT, GAF_HEADER_STRUCT_SIZE } from "./structs";
 
 export function fromBuffer(data: DataView) {
   return readEntries(data);
@@ -54,23 +54,14 @@ function parseFrameData(data: DataView, offset: number): FrameData {
   const nextFrameDataStruct = ByteUtils.makeStruct(data, offset, GAF_FRAME_DATA_STRUCT);
 
   if (nextFrameDataStruct['FramePointers'] === 0) { // then PtrFrameData points to pixel data
-    const frameData = nextFrameDataStruct['Compressed'] === 0
-      ? parseUncompressedLayerData(
-        data,
-        nextFrameDataStruct['PtrFrameData'],
-        nextFrameDataStruct['Width'],
-        nextFrameDataStruct['Height'],
-      )
-      : parseCompressedLayerData(
-        data,
-        nextFrameDataStruct['PtrFrameData'],
-        nextFrameDataStruct['Height'],
-      );
-
-    const normalizedFrameData = normalizeLayerData(frameData);
-
-    // TODO do something with the value below:
-    nextFrameDataStruct['TransparencyIndex'];
+    const layerData = parseLayerData(
+      data,
+      nextFrameDataStruct['Compressed'],
+      nextFrameDataStruct['TransparencyIndex'],
+      nextFrameDataStruct['PtrFrameData'],
+      nextFrameDataStruct['Width'],
+      nextFrameDataStruct['Height'],
+    );
 
     return {
       kind: 'single',
@@ -78,7 +69,8 @@ function parseFrameData(data: DataView, offset: number): FrameData {
       height: nextFrameDataStruct['Height'],
       xOffset: nextFrameDataStruct['XPos'],
       yOffset: nextFrameDataStruct['YPos'],
-      data: normalizedFrameData,
+      transparencyIndex: nextFrameDataStruct['TransparencyIndex'],
+      data: layerData,
     };
   }
 
@@ -111,40 +103,63 @@ function parseFrameData(data: DataView, offset: number): FrameData {
   };
 }
 
+// TODO turn all these parameters into an object
+function parseLayerData(
+  data: DataView,
+  compressionFlag: number,
+  transparencyIndex: number,
+  offset: number,
+  width: number,
+  height: number,
+): LayerData {
+  const frameData
+    = compressionFlag === 0 ? parseUncompressedLayerData(data, offset, width, height,)
+    : compressionFlag === 1 ? parseCompressedLayerData(data, offset, width, height, transparencyIndex)
+    : compressionFlag === 4 ? parseRawColors(data, offset, width, height, 'argb4444')
+    : compressionFlag === 5 ? parseRawColors(data, offset, width, height, 'argb1555')
+    : undefined;
+
+  if (frameData === undefined) {
+    throw new Error(`Unknown compression flag: ${compressionFlag}`);
+  }
+
+  return frameData;
+}
+
+// TODO turn all these parameters into an object
 function parseUncompressedLayerData(
   data: DataView,
   offset: number,
   width: number,
   height: number,
-): LayerData {
-  const lines: Uint8Array[] = [];
-
-  for (let i = 0; i < height; i++) {
-    const lineData = new Uint8Array(data.buffer, offset, width);
-    offset += width; // from the lineData's length
-
-    lines.push(lineData);
-  }
+): LayerDataPaletteIndices {
+  const indices = new Uint8Array(data.buffer, offset, width * height);
 
   return {
-    decompressed: false,
-    pixelTable: lines,
+    kind: 'palette-idx',
+    indices,
   };
 }
 
 const TRANSPARENCY_MASK = 0x01;
 const REPEAT_MASK = 0x02;
 
+// TODO turn all these parameters into an object
 function parseCompressedLayerData(
   data: DataView,
   offset: number,
-  linesCount: number,
-): LayerData {
-  const lines: Array<number | undefined>[] = [];
+  width: number,
+  height: number,
+  transparencyIndex: number,
+): LayerDataPaletteIndices {
+  const indices = new Uint8Array(width * height);
+  indices.fill(transparencyIndex);
 
-  for (let y = 0; y < linesCount; y++) {
-    const nextLine: Array<number | undefined> = [];
+  const putPixel = (px: number, py: number, color: number) => {
+    indices[px + py * width] = color;
+  };
 
+  for (let y = 0; y < height; y++) {
     const bytes = data.getUint16(offset, true); // aka lineLength
     offset += 2; // sizeof Uint16
 
@@ -160,96 +175,41 @@ function parseCompressedLayerData(
       else if ((mask & REPEAT_MASK) === REPEAT_MASK) {
         let repeat = (mask >> 2) + 1;
         while (repeat--) {
-          nextLine[x++] = data.getUint8(offset + count);
+          putPixel(x++, y, data.getUint8(offset + count));
         }
         count++;
       }
       else {
         let read = (mask >> 2) + 1;
         while (read--) {
-          nextLine[x++] = data.getUint8(offset + count++);
+          putPixel(x++, y, data.getUint8(offset + count++));
         }
       }
     }
 
     offset += bytes;
-
-    lines.push(nextLine);
   }
 
   return {
-    decompressed: true,
-    pixelTable: lines,
+    kind: 'palette-idx',
+    indices,
   };
 }
 
-function normalizeLayerData(frameData: LayerData): LayerData {
-  if (frameData.pixelTable.length <= 1) {
-    return frameData;
-  }
-
-  let maxWidth = frameData.pixelTable[0].length;
-  let alreadyNormalized = true;
-
-  for (let i = 1; i < frameData.pixelTable.length; i++) {
-    if (frameData.pixelTable[i].length !== maxWidth) {
-      alreadyNormalized = false;
-      maxWidth = Math.max(frameData.pixelTable[i].length, maxWidth);
-    }
-  }
-
-  if (alreadyNormalized) {
-    return frameData;
-  }
-
-  // console.error(`This frame possesses pixel lines with different widths!`);
-
-  if (frameData.decompressed) {
-    const normalizedPixelTable: Array<number | undefined>[] = [];
-
-    for (let i = 0; i < frameData.pixelTable.length; i++) {
-      const srcLine = frameData.pixelTable[i];
-
-      if (srcLine.length === maxWidth) {
-        normalizedPixelTable.push(srcLine);
-        continue;
-      }
-
-      const diff = maxWidth - srcLine.length;
-      const outLine = [...srcLine];
-      outLine.push(...Array(diff).fill(undefined));
-      normalizedPixelTable.push(outLine);
-    }
-
-    return {
-      ...frameData,
-      pixelTable: normalizedPixelTable,
-    };
-  }
-
-  console.error(`Yeah... something must have gone very wrong... It's looks VERY unusual for` +
-    ` non-decompressed pixelTables to have uneven widths.`);
-
-  const normalizedPixelTable: Uint8Array[] = [];
-
-  for (let i = 0; frameData.pixelTable.length; i++) {
-    const srcLine = frameData.pixelTable[i];
-
-    if (srcLine.length === maxWidth) {
-      normalizedPixelTable.push(srcLine);
-      continue;
-    }
-
-    const outLine = new Uint8Array(maxWidth);
-    outLine.fill(0);
-    srcLine.forEach((pixel, idx) => outLine[idx] = pixel);
-
-    normalizedPixelTable.push(outLine);
-  }
+// TODO turn all these parameters into an object
+function parseRawColors(
+  data: DataView,
+  offset: number,
+  width: number,
+  height: number,
+  format: LayerDataRawColors['format'],
+): LayerDataRawColors {
+  const colors = new Uint16Array(data.buffer, offset, width * height);
 
   return {
-    ...frameData,
-    pixelTable: normalizedPixelTable,
+    kind: 'raw',
+    colors,
+    format,
   };
 }
 
